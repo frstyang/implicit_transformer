@@ -3,7 +3,7 @@ import torch
 from torch import nn
 F = nn.functional
 
-from .implicit_transformer_function import ImplicitTransformerFn, custom_layer_norm
+from .implicit_transformer_function import custom_layer_norm
 
 def make_sinusoidal_emb(s, d, device='cpu', offset=0):
     # s: sequence length, d: dimension of each position's embedding
@@ -47,7 +47,7 @@ class FFLayer(nn.Module):
         
         
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_heads, dim, dropout):
+    def __init__(self, n_heads, dim, dropout, causal=False):
         super().__init__()
         self.W_qkv = nn.Linear(dim, 3*dim, bias=False)
         self.n_heads = n_heads
@@ -55,6 +55,7 @@ class MultiHeadAttention(nn.Module):
             self.W_o = nn.Linear(dim, dim, bias=False)
         self.scale = (dim / n_heads) ** (-0.5)
         self.dropout = nn.Dropout(dropout)
+        self.causal = causal
         
     def forward(self, x, src_mask):
         # x: (batch_size, max_seq_len, dim)
@@ -68,6 +69,7 @@ class MultiHeadAttention(nn.Module):
             logits = rearrange(logits, '(b n_h) s1 s2 -> b n_h s1 s2', n_h=self.n_heads)
             logits.masked_fill_(src_mask[:, None, None, :], float("-inf"))
             logits = rearrange(logits, 'b n_h s1 s2 -> (b n_h) s1 s2', n_h=self.n_heads)
+        self.causal_mask(logits)
         attn = torch.softmax(logits, dim=-1)
         attn = self.dropout(attn)
         out = torch.bmm(attn, v)
@@ -76,13 +78,21 @@ class MultiHeadAttention(nn.Module):
             out = self.W_o(out)
         return out
 
+    def causal_mask(self, logits):
+        if not self.causal:
+            return
+        i, j = logits.shape[-2:]
+        causal_mask = torch.ones((i, j), dtype=torch.bool, device=logits.device).triu(j - i + 1)
+        logits.masked_fill_(causal_mask, float("-inf"))
+
 
 class RelativeMultiHeadAttention(MultiHeadAttention):
-    def __init__(self, n_heads, dim, dropout):
+    def __init__(self, n_heads, dim, dropout, causal=False):
         super().__init__(n_heads, dim, dropout)
         self.global_content_bias = nn.Parameter(torch.zeros((n_heads, 1, dim // n_heads)))
         self.global_pos_bias = nn.Parameter(torch.zeros((n_heads, 1, dim // n_heads)))
         self.pe_to_key = nn.Linear(dim, dim, bias=False)
+        self.causal = causal
 
     def _rel_shift(self, pos):
         # pos: (batch_size, n_heads, msl, 2*msl - 1)
@@ -119,6 +129,7 @@ class RelativeMultiHeadAttention(MultiHeadAttention):
 
         if src_mask is not None:
             logits.masked_fill_(src_mask[:, None, None, :], float("-inf"))
+        self.causal_mask(logits)
 
         attn = torch.softmax(logits, dim=-1)
         attn = self.dropout(attn)
@@ -127,38 +138,18 @@ class RelativeMultiHeadAttention(MultiHeadAttention):
         if self.n_heads > 1:
             out = self.W_o(out)
         return out
-
-
-class ImplicitMultiHeadAttention(nn.Module):
-    def __init__(self, n_heads, dim, dropout):
-        super().__init__()
-        self.W_qkv = nn.Linear(dim, 3*dim, bias=False)
-        self.n_heads = n_heads
-        if n_heads > 1:
-            self.W_o = nn.Linear(dim, dim, bias=False)
-        self.scale = (dim / n_heads) ** (-0.5)
-        self.dropout = nn.Dropout(dropout)
-        self.A = nn.Linear(dim, 3*dim, bias=False)
-
-    def forward(self, x, src_mask):
-        return ImplicitTransformerFn.apply(self.A.weight, self.W_qkv.weight, 
-            self.W_o.weight, x, src_mask, self.n_heads,
-        )
     
     
 class TransformerBlock(nn.Module):
     def __init__(self, dim, n_heads, ff_dim, dropout, pre_ln=False, relative=False,
-        implicit=False, custom_ln=False):
+        custom_ln=False, causal=False):
         super().__init__()
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
-        self.implicit = implicit
-        if implicit:
-            self.mha = ImplicitMultiHeadAttention(n_heads, dim, dropout)
-        elif relative:
-            self.mha = RelativeMultiHeadAttention(n_heads, dim, dropout)
+        if relative:
+            self.mha = RelativeMultiHeadAttention(n_heads, dim, dropout, causal=causal)
         else:
-            self.mha = MultiHeadAttention(n_heads, dim, dropout)
+            self.mha = MultiHeadAttention(n_heads, dim, dropout, causal=causal)
         self.ff_layer = FFLayer(dim, ff_dim, dropout)
         if custom_ln:
             layer_norm = lambda dim, elementwise_affine: custom_layer_norm
@@ -176,10 +167,7 @@ class TransformerBlock(nn.Module):
             x = x + self.dropout1(self.mha(self.norm1(x), src_mask))
             x = x + self.dropout2(self.ff_layer(self.norm2(x)))
         else:
-            if self.implicit:
-                x = self.mha(x, src_mask)
-            else:
-                x = self.norm1(x + self.dropout1(self.mha(x, src_mask)))
+            x = self.norm1(x + self.dropout1(self.mha(x, src_mask)))
             x = self.norm2(x + self.dropout2(self.ff_layer(x)))
         return x
         
@@ -187,42 +175,53 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, dim, n_layers, n_heads, ff_dim, vocab_size, n_classes,
                  dropout=0.1, pre_ln=False, universal=False, relative=False,
-                 implicit=False, emb_norm=False, custom_ln=False):
+                 emb_norm=False, custom_ln=False, causal=False, padding_idx=None,
+                 append_cls=True, autoreg=False):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size+1, dim, padding_idx=vocab_size)
+        if padding_idx is None:
+            self.embedding = nn.Embedding(vocab_size+1, dim, padding_idx=vocab_size)
+        else:
+            self.embedding = nn.Embedding(vocab_size, dim, padding_idx=padding_idx)
         self.embedding.weight.data.normal_(0, dim**(-0.5))
-        self.cls_token = nn.Parameter(torch.normal(0, dim**(-0.5), (1, 1, dim)))
+        self.append_cls = append_cls
+        if append_cls:
+            self.cls_token = nn.Parameter(torch.normal(0, dim**(-0.5), (1, 1, dim)))
         self.pos_emb = PosEmb(dim)
         self.emb_dropout = nn.Dropout(dropout)
+        args = (dim, n_heads, ff_dim, dropout)
+        kwargs = {'pre_ln': pre_ln, 'relative': relative, 'custom_ln': custom_ln, 'causal': causal}
         if universal:
-            self.transformer_block = TransformerBlock(dim, n_heads, ff_dim, dropout, pre_ln=pre_ln,
-                relative=relative)
+            self.transformer_block = TransformerBlock(*args, **kwargs)
             self.transformer_blocks = [self.transformer_block for i in range(n_layers)]
         else:
-            self.transformer_blocks = nn.ModuleList([
-                TransformerBlock(dim, n_heads, ff_dim, dropout, pre_ln=pre_ln, relative=relative,
-                    implicit=implicit, custom_ln=custom_ln)
-                for i in range(n_layers)
-            ])
+            self.transformer_blocks = nn.ModuleList([TransformerBlock(*args, **kwargs) for i in range(n_layers)])
+        self.autoreg = (n_classes == 'auto') or autoreg
+        if n_classes == 'auto':
+            n_classes = vocab_size
         self.linear = nn.Linear(dim, n_classes)
         self.relative = relative
-        self.implicit = implicit
+
         self.emb_norm = emb_norm
         
-    def forward(self, x, seq_lens):
+    def forward(self, x, seq_lens=None, src_mask=None):
         # x: (batch_size, max_seq_len)
         # seq_lens: (batch_size)
-        pos = torch.arange(0, x.shape[1] + 1, device=x.device)
-        src_mask = seq_lens[:, None] + 1 <= pos
+        assert (seq_lens is not None) ^ (src_mask is not None)
         x = self.embedding(x)
         x = self.emb_dropout(x)
         if not self.relative:
             x = x + self.pos_emb(x)
-        x = torch.cat((self.cls_token.repeat(len(x), 1, 1), x), dim=1)
-        if self.implicit or self.emb_norm:
+        if self.append_cls:
+            x = torch.cat((self.cls_token.repeat(len(x), 1, 1), x), dim=1)
+        if self.emb_norm:
             x = custom_layer_norm(x)
-        
+        if src_mask is None:
+            pos = torch.arange(0, x.shape[1], device=x.device)
+            src_mask = seq_lens[:, None] + self.append_cls <= pos
         for i in range(len(self.transformer_blocks)):
             x = self.transformer_blocks[i](x, src_mask)
-        logits = self.linear(x[:, 0, :])
+        if self.autoreg:
+            logits = self.linear(x)
+        else:
+            logits = self.linear(x[:, 0, :])
         return logits
