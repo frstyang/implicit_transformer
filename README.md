@@ -1,4 +1,4 @@
-EADME
+# README
 This repository implements a standard transformer, work-in-progress versions of an implicit transformer along with a training script that can be applied to various datasets. Instructions for downloading the necessary files for each dataset are given below.
 
 To train on any dataset, run `python --config configs/{dataset_name}.py`. Model specifications such as the width, depth, transformer class, and training hyperparameters can be set by directly modifying the config file specified after `--config`.
@@ -61,42 +61,42 @@ where the question is separated from the passage by a `[SEP]` token. In this cas
 Download `train-v2.0.json` and `dev-v2.0.json` from https://rajpurkar.github.io/SQuAD-explorer/ by clicking on the buttons labeled "Training Set v2.0 (40 MB)" and "Dev Set v2.0 (4 MB)". Move these files to `cache/SQuAD`. In the end, the directory layout should look like:
 ```
 cache/SQuAD/
-        train-v2.0.json
-                dev-v2.0.json
-                ```
-                ### WikiText-103
-                Text extracted from Wikipedia used for language modeling, where the task is to predict the next token. For example, the first 400 characters of the training set are:
-                ```
-                = Valkyria Chronicles III = 
-                 
-                  Senjō no Valkyria 3 : Unrecorded Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series .
-                   ```
-                   The tokenizer, taken from https://huggingface.co/docs/tokenizers/quicktour, uses a Byte-Pair Encoding and tokenizes the previous text into the following 103 tokens separated by spaces:
-                   ```
-                   = V alk y ria Chronicles III = Sen j ō no V alk y ria 3 : Un recorded Chronicles ( Japanese : 戦 場 の ヴ ァ ル キ ュ リ ア 3 , lit . V alk y ria of the Battle field 3 ) , commonly referred to as V alk y ria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media . Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the V alk y ria series .
-                   ```
-                   Download the raw WikiText-103 data here: https://blog.salesforceairesearch.com/the-wikitext-long-term-dependency-language-modeling-dataset/. Scroll down to the link that says "Download WikiText-103 raw character level data" and click to download.
-                   Then, extract the contents of the downloaded zip file into the `cache/raw` directory in this repository. If this directory does not exist, create it. In the end, the directory layout should look like this:
-                   ```
-                   cache/raw/
-                        wikitext-103-raw/
-                                        wikitext-103-raw/wiki.test.raw
-                                                        wikitext-103-raw/wiki.train.raw
-                                                                        wikitext-103-raw/wiki.valid.raw
-                                                                        ```
+    train-v2.0.json
+    dev-v2.0.json
+```
+### WikiText-103
+Text extracted from Wikipedia used for language modeling, where the task is to predict the next token. For example, the first 400 characters of the training set are:
+```
+= Valkyria Chronicles III = 
 
-                                                                        ### Place Value Dataset
-                                                                        This dataset contains examples of the form:
-                                                                        Input: What is the millions digit of 9967193?
-                                                                        Output: 9
+  Senjō no Valkyria 3 : Unrecorded Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series .
+```
+   The tokenizer, taken from https://huggingface.co/docs/tokenizers/quicktour, uses a Byte-Pair Encoding and tokenizes the previous text into the following 103 tokens separated by spaces:
+```
+   = V alk y ria Chronicles III = Sen j ō no V alk y ria 3 : Un recorded Chronicles ( Japanese : 戦 場 の ヴ ァ ル キ ュ リ ア 3 , lit . V alk y ria of the Battle field 3 ) , commonly referred to as V alk y ria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media . Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the V alk y ria series .
+```
+   Download the raw WikiText-103 data here: https://blog.salesforceairesearch.com/the-wikitext-long-term-dependency-language-modeling-dataset/. Scroll down to the link that says "Download WikiText-103 raw character level data" and click to download.
+   Then, extract the contents of the downloaded zip file into the `cache/raw` directory in this repository. If this directory does not exist, create it. In the end, the directory layout should look like this:
+```
+cache/raw/
+    wikitext-103-raw/
+        wiki.test.raw
+        wiki.train.raw
+        wiki.valid.raw
+```
 
-                                                                        The setup of this dataset is based on https://github.com/robertcsordas/transformer_generalization.
-                                                                        Download the mathematics_dataset-v1.0 folder from [here](https://drive.google.com/drive/folders/1PDcNYAkqEbQP-k5do1YohczgHtQGl8mM?usp=share_link) and move it to the `cache` directory in this repository. The directory layout should look like:
-                                                                        ```
-                                                                        cache/dm_math/mathematics_dataset-v1.0/
-                                                                                extrapolate/
-                                                                                        interpolate/
-                                                                                                train-easy/
-                                                                                                        train-hard/
-                                                                                                                train-medium/
-                                                                                                                ```
+### Place Value Dataset
+This dataset contains examples of the form:
+Input: What is the millions digit of 9967193?
+Output: 9
+
+The setup of this dataset is based on https://github.com/robertcsordas/transformer_generalization.
+Download the mathematics_dataset-v1.0 folder from [here](https://drive.google.com/drive/folders/1PDcNYAkqEbQP-k5do1YohczgHtQGl8mM?usp=share_link) and move it to the `cache` directory in this repository. The directory layout should look like:
+```
+cache/dm_math/mathematics_dataset-v1.0/
+    extrapolate/
+    interpolate/
+    train-easy/
+    train-hard/
+    train-medium/
+```
