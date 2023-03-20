@@ -206,7 +206,6 @@ class Transformer(nn.Module):
     def forward(self, x, seq_lens=None, src_mask=None):
         # x: (batch_size, max_seq_len)
         # seq_lens: (batch_size)
-        assert (seq_lens is not None) ^ (src_mask is not None)
         x = self.embedding(x)
         x = self.emb_dropout(x)
         if not self.relative:
@@ -215,7 +214,7 @@ class Transformer(nn.Module):
             x = torch.cat((self.cls_token.repeat(len(x), 1, 1), x), dim=1)
         if self.emb_norm:
             x = custom_layer_norm(x)
-        if src_mask is None:
+        if src_mask is None and seq_lens is not None:
             pos = torch.arange(0, x.shape[1], device=x.device)
             src_mask = seq_lens[:, None] + self.append_cls <= pos
         for i in range(len(self.transformer_blocks)):
