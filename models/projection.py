@@ -4,24 +4,37 @@ import scipy
 from sklearn.decomposition import TruncatedSVD
 import torch
 
-def project_l2(W, s_max, k, exact=False):
+def project_l2(W, s_max, k, exact=False, numpy=False):
     # W: a 2D torch.tensor
-    W_numpy = W.data.cpu().numpy()
-    if exact:
-        u, s, v = np.linalg.svd(W_numpy, full_matrices=False)
+    if s_max <= 1e-6:
+        W.data.zero_()
+        return
+    W_cpu = W.data.cpu()
+    if numpy:
+        W_numpy = W.data.cpu().numpy()
+        if exact:
+            u, s, v = np.linalg.svd(W_numpy, full_matrices=False)
+        else:
+            tsvd = TruncatedSVD(k).fit(W_numpy)
+            v = tsvd.components_
+            s = tsvd.singular_values_
     else:
-        tsvd = TruncatedSVD(k).fit(W_numpy)
-        v = tsvd.components_
-        s = tsvd.singular_values_
+        u, s, v = torch.svd(W_cpu)
+        v = v.transpose(0, 1)
     greater_than_s_max = s > s_max
     if greater_than_s_max.sum() == 0:
         return W
     v_greater = v[greater_than_s_max]
     s_greater = s[greater_than_s_max]
-    s_u_greater = W_numpy @ v_greater.T 
+    if numpy:
+        s_u_greater = W_numpy @ v_greater.T
+    else:
+        s_u_greater = W_cpu @ v_greater.T
     s_max_minus_s_u_greater = s_u_greater * (s_max / s_greater - 1)
-    W.data.copy_(torch.tensor(W_numpy + s_max_minus_s_u_greater @ v_greater, device=W.device))
-
+    if numpy:
+        W.data.copy_(torch.tensor(W_numpy + s_max_minus_s_u_greater @ v_greater, device=W.device))
+    else:
+        W.data.copy_((W_cpu + s_max_minus_s_u_greater @ v_greater).to(W.device))
 
 def l1_project(a_orig, v):
     a_sign = np.sign(a_orig)
@@ -125,36 +138,22 @@ def get_block(A, i, i_dim, j, j_dim, i_offset, j_offset):
     j_base = j_offset + j*j_dim
     return A[i_base:i_base + i_dim, j_base:j_base + j_dim]
 
-def create_NA(A, relu_dim, ln_dim, attn_dim, n_layer_norms, n_heads):
+def create_NA(A, relu_dim, ln_dim, attn_dim, n_layer_norms, n_heads, n_relu_heads):
     A = A.data.detach().clone().cpu()
     A_norm = torch.zeros(
-        (relu_dim + n_layer_norms, relu_dim + n_layer_norms + n_heads)
+        (n_relu_heads + n_layer_norms, n_relu_heads + n_layer_norms + n_heads)
     )
-    # relu to relu
-    A_norm[:relu_dim, :relu_dim] = A[:relu_dim, :relu_dim].abs()
-
-    for i in range(n_layer_norms):
-        dim = ln_dim // n_layer_norms
-        # ln to relu
-        A_norm[:relu_dim, relu_dim + i] = \
-            get_block(A, 0, relu_dim, i, dim, 0, relu_dim).norm(dim=1)
-        # relu to ln
-        A_norm[relu_dim + i, :relu_dim] = \
-            get_block(A, i, dim, 0, relu_dim, relu_dim, 0).norm(dim=0)
-        for j in range(n_layer_norms):
-            # ln to ln
-            A_norm[relu_dim + i, relu_dim + j] = torch.linalg.norm(
-                get_block(A, i, dim, j, dim, relu_dim, relu_dim), ord=2)
-        dim = attn_dim // n_heads
-        for j in range(n_heads):
-            # attn to ln
-            A_norm[relu_dim + i, relu_dim + n_layer_norms + j] = torch.linalg.norm(
-                get_block(A, i, ln_dim // n_layer_norms, j, dim, relu_dim, relu_dim + ln_dim), ord=2)
-            
-    for i in range(n_heads):
-        # attn to relu
-        A_norm[:relu_dim, relu_dim + n_layer_norms + i] = \
-            get_block(A, 0, relu_dim, i, dim, 0, relu_dim + ln_dim).norm(dim=1)
+    chunks = np.cumsum([relu_dim // n_relu_heads]*n_relu_heads
+        + [ln_dim // n_layer_norms]*n_layer_norms
+        + [attn_dim // n_heads]*n_heads)
+    chunks = tuple(chunks)
+    A = A.tensor_split(chunks[:n_relu_heads + n_layer_norms - 1], dim=0)
+    A = [A_s.tensor_split(chunks, dim=1)[:-1] for A_s in A]
+    assert np.all([len(A_s) == n_relu_heads + n_layer_norms + n_heads for A_s in A])
+    assert len(A) == n_relu_heads + n_layer_norms
+    for i in range(n_relu_heads + n_layer_norms):
+        for j in range(n_relu_heads + n_layer_norms + n_heads):
+            A_norm[i, j] = torch.linalg.norm(A[i][j], ord=2)
     return A_norm
 
 def create_A_qkv_norms(A_qkv, n_heads, n_layer_norms):
@@ -175,7 +174,6 @@ def L_qkv(A_qkv, i, j, n_heads, n_lns, cache):
     A_q, A_k, A_v = A_qkv[i]
     d = A_q.shape[-1] // n_lns
     p = A_q.shape[0]
-    #print(p, ln_d)
     N_q = torch.linalg.norm(A_q[:, j*d:(j+1)*d], ord=2)
     N_k = torch.linalg.norm(A_k[:, j*d:(j+1)*d], ord=2)
     N_v = torch.linalg.norm(A_v[:, j*d:(j+1)*d], ord=2)
@@ -186,8 +184,6 @@ def L_qkv(A_qkv, i, j, n_heads, n_lns, cache):
         N_k_s = sum([torch.linalg.norm(A_k[:, k*d:(k+1)*d], ord=2) for k in range(n_lns)])
         N_v_s = sum([torch.linalg.norm(A_v[:, k*d:(k+1)*d], ord=2) for k in range(n_lns)])
         cache[i] = (N_q_s, N_k_s, N_v_s)
-    #print(N_q, N_k, N_v)
-    #print(N_q_s, N_k_s, N_v_s)
     return N_v_s*(N_k_s*N_q + N_q_s*N_k)*p**(-0.5) + N_v
 
 # ====================================================================================================

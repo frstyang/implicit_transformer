@@ -10,21 +10,6 @@ import wandb
 from einops import rearrange, repeat
 from sklearn.decomposition import TruncatedSVD
 
-def project(W, s_max, k):
-    # W: a 2D torch.tensor
-    W_numpy = W.cpu().numpy()
-    tsvd = TruncatedSVD(k).fit(W_numpy)
-    v = tsvd.components_
-    s = tsvd.singular_values_
-    greater_than_s_max = s > s_max
-    if greater_than_s_max.sum() == 0:
-        return W
-    v_greater = v[greater_than_s_max]
-    s_greater = s[greater_than_s_max]
-    s_u_greater = W_numpy @ v_greater.T 
-    s_max_minus_s_u_greater = s_u_greater * (s_max / s_greater - 1)
-    return torch.tensor(W_numpy + s_max_minus_s_u_greater @ v_greater, device=W.device)
-
 CHECKPOINT_PATH = "./checkpoint.pt"
 def wandb_log(scores):
     if len(scores) > 0:
@@ -33,7 +18,6 @@ def wandb_log(scores):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config")
-    parser.add_argument("--project", default=False)
     args = parser.parse_args()
 
     spec = importlib.util.spec_from_file_location("config", args.config)
@@ -44,28 +28,25 @@ if __name__ == "__main__":
     val_loader = config.val_loader
     test_loader = config.test_loader
 
-    # 3/8 reminder; when porting sparse implicit transformer the to-port model should be loaded
-    # first to use the random seed on the to-port model initialization
+    # when porting sparse implicit transformer the model to port should be loaded
+    # first to use the random seed on the model to port's initialization
 
-    if config.port_model:
+    if getattr(config, 'port_model', False):
         kwargs = config.port_model_kwargs
         model_to_port = config.port_model_class(**kwargs)
         model_to_port.cuda()
-        # model_to_port.load_state_dict(
-        #     torch.load(config.port_model_ckpt)['model_state_dict']
-        # )
-        # model.port_transformer(kwargs['dim'], kwargs['ff_dim'], kwargs['n_layers'], model_to_port)
-        # model.S_from_ported_transformer(kwargs['n_layers'], v=0.95)
 
+    print(f"Model class: {config.model_class.__name__}")
     model = config.model_class(**config.model_kwargs)
-    if config.double:
+    if getattr(config, 'double', False):
         model.double()
-    model.cuda()
+    if getattr(config, 'cuda', True):
+        model.cuda()
 
-    if config.port_model:
+    if getattr(config, 'port_model', False):
         config.port_model_fn(model_to_port, model)
 
-    if args.project:
+    if getattr(config, 'project', False):
         v = 0.9
         model.project(v=v, exact=True)
 
@@ -82,8 +63,9 @@ if __name__ == "__main__":
 
     i = 0
     
-    test_scores = []
-    best_accuracy = 0
+    assert config.model_checkpoint_freq % config.test_val_freq == 0
+    monitor_metric = getattr(config, 'monitor_metric', 'val/acc')
+    best_val_metric = 0
     while i < config.num_iters:
         model.train()
         for batch in train_loader:
@@ -93,13 +75,10 @@ if __name__ == "__main__":
             optim.step()
             optim.zero_grad()
 
-            if args.project and (i % config.project_freq == 0):
+            if getattr(config, 'project') and (i % config.project_freq == 0):
                 model.project(v=v, exact=True)
-            # from models.projection import create_NA, create_NA_qkv
-            # print(create_NA(model.A, model.relu_dim, model.ln_dim, model.dim, model.n_layer_norms, model.n_heads, model.n_relu_heads).sum(dim=1))
-            # print(create_NA_qkv(model.A_qkv, model.n_heads, model.n_layer_norms).sum(dim=1))
+
             i += 1
-            test_scores = []
             if i % config.test_val_freq == 0:
                 eval_splits = ['val'] + config.do_test_loop * ['test']
                 eval_loaders = [val_loader] + config.do_test_loop * [test_loader]
@@ -107,29 +86,34 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     for split, loader in zip(eval_splits, eval_loaders):
                         split_outputs = []
+                        val_scores_for_each_batch = []
                         for batch in loader:
                             loss, scores, outputs = config.compute_scores(model, batch, split)
                             split_outputs.append(outputs)
-                            wandb_log(scores)
+                            val_scores_for_each_batch.append(scores)
+
+                        scores_this_iteration = {k: np.mean([batch_scores[k] for batch_scores
+                            in val_scores_for_each_batch]) for k in val_scores_for_each_batch[0].keys()}
                         if getattr(config, "do_compile_eval", False):
                             split_outputs = config.compile(split_outputs)
                             metrics = config.evaluate(split_outputs, split)
-                            wandb_log(metrics)
-                        if split == 'test':
-                            test_scores.append(scores)
+                            scores_this_iteration.update(metrics)
+                        wandb_log(scores_this_iteration)
+                        if split == 'val':
+                            val_metric = scores_this_iteration[monitor_metric]
 
             if i % config.model_checkpoint_freq == 0:
                 torch.save(
-                    {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict()}, 
+                    {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict(), monitor_metric: val_metric},
                     CHECKPOINT_PATH,
                 )
-                # if test_scores[-1]['test/acc'] > best_accuracy:
-                #     print(f"Test accuracy of {test_scores[-1]['test/acc']} was better than {best_accuracy}, saving")
-                #     best_accuracy = test_scores[-1]['test/acc']
-                #     torch.save(
-                #         {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict()},
-                #         './best_checkpoint.pt',
-                #     )
+                if val_metric > best_val_metric:
+                    print(f"{monitor_metric} of {val_metric} at iteration {i} was better than {best_val_metric}, checkpointing")
+                    best_val_metric = val_metric
+                    torch.save(
+                        {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict(), monitor_metric: val_metric},
+                        './best_checkpoint.pt',
+                    )
 
             if i == config.num_iters:
                 break

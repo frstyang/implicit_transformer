@@ -11,11 +11,15 @@ wandb_project = "wikitext103_transformer"
 batch_size = 64
 num_iters = 50000
 lr = 1e-4
+
 test_val_freq = 1000
 model_checkpoint_freq = 1000
 do_test_loop = True
 project_freq = 10
+
+cuda = True
 double = False
+
 port_model = False
 
 seq_length = 128

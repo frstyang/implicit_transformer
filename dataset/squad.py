@@ -5,6 +5,9 @@ import torch
 import numpy as np
 import evaluate
 
+# the preprocessing and metric computations in this file are taken from the following 
+# HuggingFace tutorial: https://huggingface.co/course/chapter7/7?fw=tf
+
 model_checkpoint = "bert-base-cased"
 tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
 

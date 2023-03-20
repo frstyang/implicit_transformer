@@ -26,7 +26,7 @@ def scale_by_S(A, A_qkv, S, n_heads, ln_dim, ln_offset):
 
 class ImplicitTransformer(nn.Module):
     def __init__(self, dim, n_heads, vocab_size, n_classes, relu_dim=None, ln_dim=None,
-        emb_dim=None, n_layer_norms=1, n_relu_heads=None):
+        emb_dim=None, n_layer_norms=1, n_relu_heads=1, jac_reg=True):
         super().__init__()
         relu_dim = dim if relu_dim is None else relu_dim
         ln_dim = dim if ln_dim is None else ln_dim
@@ -48,91 +48,64 @@ class ImplicitTransformer(nn.Module):
         self.dim = dim
         self.emb_dim = emb_dim
         self.S = None
+        self.jac_reg = jac_reg
 
         torch.nn.init.kaiming_normal_(self.A)
         torch.nn.init.kaiming_normal_(self.A_qkv)
-        #self.project(v=0.95, exact=True)
 
-    def forward(self, x, seq_lens):
+    def gen_u_src_mask(self, x, seq_lens):
         # setup inputs to implicit model
         pos = torch.arange(0, x.shape[1] + 1, device=x.device)
         src_mask = seq_lens[:, None] + 1 <= pos
         u = self.embedding(x)
         u = u + self.pos_emb(u)
         u = torch.cat((self.cls_token.repeat(len(u), 1, 1), u), dim=1)
+        return u, src_mask
 
-        # implicit time!!
+    def compute_X(self, x, seq_lens):
+        u, src_mask = self.gen_u_src_mask(x, seq_lens)
         x = ITFn2.apply(self.A, self.A_qkv, self.b, u, src_mask, self.n_heads, self.n_layer_norms,
-            self.relu_dim, self.ln_dim, self.dim, self.emb_dim)
+            self.relu_dim, self.ln_dim, self.dim, self.emb_dim, self.jac_reg)
+        return x
+
+    def forward(self, x, seq_lens):
+        x = self.compute_X(x, seq_lens)
         logits = self.cls_linear(x[:, 0])
         return logits
 
     def get(self, i, j):
-        i_chunks = np.cumsum([0] + [self.relu_dim, self.ln_dim])
-        j_chunks = np.cumsum([0] + [self.relu_dim, self.ln_dim, self.dim, self.emb_dim])
-        return self.A[i_chunks[i]:i_chunks[i+1], j_chunks[j]:j_chunks[j+1]]
+        relu_dim, ln_dim, dim = self.relu_dim, self.ln_dim, self.dim
+        n_relu_heads, n_layer_norms, n_heads = self.n_relu_heads, self.n_layer_norms, self.n_heads
+        chunks = np.cumsum([0] + [relu_dim // n_relu_heads]*n_relu_heads + [ln_dim // n_layer_norms]*n_layer_norms
+            + [dim // n_heads]*n_heads)
+        return self.A[chunks[i]:chunks[i+1], chunks[j]:chunks[j+1]]
 
     def project(self, v=0.95, exact=True):
         relu_dim, ln_dim, attn_dim = self.relu_dim, self.ln_dim, self.dim
-        n_layer_norms, n_heads = self.n_layer_norms, self.n_heads
+        n_layer_norms, n_heads, n_relu_heads = self.n_layer_norms, self.n_heads, self.n_relu_heads
         A, A_qkv = scale_by_S(self.A, self.A_qkv, self.S, self.n_heads, self.ln_dim, self.relu_dim)
         p = A_qkv.shape[0] // (3*n_heads)
 
         time1 = time.time()
         # compute norm matrices
-        NA = create_NA(A, relu_dim, ln_dim, attn_dim, n_layer_norms, n_heads)
+        NA = create_NA(A, relu_dim, ln_dim, attn_dim, n_layer_norms, n_heads, n_relu_heads)
         old_NA = NA.clone()
         A_qkv_norms_0 = create_A_qkv_norms(A_qkv, n_heads, n_layer_norms)
 
         time2 = time.time()
-        print(f"Time to compute norm matrices: {time2 - time1}")
+        #print(f"Time to compute norm matrices: {time2 - time1}")
         # project norm matrices
-        mrs_project(NA, 0.95)
-        sol, A_qkv_norms = solve_NA_qkv_opt(A_qkv_norms_0, p, 0.95)
+        mrs_project(NA, v)
+        sol, A_qkv_norms = solve_NA_qkv_opt(A_qkv_norms_0, p, v)
 
         time3 = time.time()
-        print(f"Time to project norm matrices: {time3 - time2}")
-
-        # project parameter matrices using projected norms
-        A[:relu_dim, :relu_dim] = NA[:relu_dim, :relu_dim] * torch.sign(A[:relu_dim, :relu_dim])
+        #print(f"Time to project norm matrices: {time3 - time2}")
 
         tol = 1e-6
-        for i in range(n_layer_norms):
-            dim = ln_dim // n_layer_norms
-            # ln to relu
-            A[:relu_dim, relu_dim + i*dim:relu_dim + (i+1)*dim] *= \
-                (NA[:relu_dim, relu_dim + i] / torch.clip(old_NA[:relu_dim, relu_dim + i], 1e-8))[:, None]
-            
-            # relu to ln
-            A[relu_dim + i*dim:relu_dim + (i+1)*dim, :relu_dim] *= \
-                NA[relu_dim + i, :relu_dim] / torch.clip(old_NA[relu_dim + i, :relu_dim], 1e-8)
-
-            for j in range(n_layer_norms):
-                # ln to ln
-                if NA[relu_dim + i, relu_dim + j] + tol < old_NA[relu_dim + i, relu_dim + j]:
-                    project_l2(
-                        A[relu_dim + i*dim:relu_dim + (i+1)*dim, relu_dim + j*dim:relu_dim + (j+1)*dim],
-                        NA[relu_dim + i, relu_dim + j].item(), 30, exact=exact,
-                    )
-                
-                
-            assert p == attn_dim // n_heads
-            offset = relu_dim + ln_dim
-            for j in range(n_heads):
-                # attn to ln
-                if (NA[relu_dim + i, relu_dim + n_layer_norms + j] + tol < 
-                    old_NA[relu_dim + i, relu_dim + n_layer_norms + j]):
-                    project_l2(
-                        A[relu_dim + i*dim:relu_dim + (i+1)*dim, offset + j*p:offset + (j+1)*p],
-                        NA[relu_dim + i, relu_dim + n_layer_norms + j].item(), 30, exact=exact,
-                    )
-
-        for i in range(n_heads):
-            # attn to relu
-            A[:relu_dim, offset + i*p:offset + (i+1)*p] *= \
-                (NA[:relu_dim, relu_dim + n_layer_norms + i] / 
-                 torch.clip(old_NA[:relu_dim, relu_dim + n_layer_norms + i], 1e-8)
-                )[:, None]
+        for i in range(n_relu_heads + n_layer_norms):
+            for j in range(n_relu_heads + n_layer_norms + n_heads):
+                if NA[i, j] + tol < old_NA[i, j]:
+                    project_l2(self.get(i, j), NA[i, j].item(), 30, exact=exact)
             
         A_qkv = rearrange(A_qkv, '(n_h n_m d2) (n_l d1) -> n_m n_h n_l d2 d1', 
                           n_h=n_heads, n_m=3, n_l=n_layer_norms)
@@ -142,10 +115,13 @@ class ImplicitTransformer(nn.Module):
                 for k in range(3):
                     if A_qkv_norms_0[k, i, j] > tol + A_qkv_norms[k, i, j]:
                         project_l2(A_qkv[k, i, j], A_qkv_norms[k, i, j], 30, exact=exact)
+
         A_qkv = rearrange(A_qkv, 'n_m n_h n_l d2 d1 -> (n_h n_m d2) (n_l d1)')
+
+        time4 = time.time()
+        #print(f"Time to project A matrices: {time4 - time3}")
         inv_S = 1 / self.S if torch.is_tensor(self.S) else None
         A, A_qkv = scale_by_S(A, A_qkv, inv_S, self.n_heads, self.ln_dim, self.relu_dim)
-        self.A.data = A.to(self.A.data.device)
         self.A_qkv.data = A_qkv.to(self.A_qkv.data.device)
 
     def port_transformer(self, dim, ff_dim, n_layers, transformer):
@@ -205,9 +181,9 @@ class ImplicitTransformer(nn.Module):
         def assign(S, cs, offset, val):
             S[offset:offset + cs] = val
 
-        S = torch.zeros(self.relu_dim + self.ln_dim + self.dim)
-        A = self.A.data.detach().clone().cpu()
-        A_qkv = self.A_qkv.data.detach().clone().cpu()
+        S = torch.zeros(self.relu_dim + self.ln_dim + self.dim, device=self.A.device)
+        A = self.A.data.detach().clone()#.cpu()
+        A_qkv = self.A_qkv.data.detach().clone()#.cpu()
         d = 256
         hd = d // 8
         n_heads = self.n_heads

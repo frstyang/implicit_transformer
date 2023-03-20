@@ -19,14 +19,18 @@ batch_size = 32
 num_iters = 50000
 lr = 1e-4
 
+cuda = True
+double = False
+
+monitor_metric = "val/f1"
 do_test_loop = False
 test_val_freq = 1000
-double = False
 do_compile_eval = True
 model_checkpoint_freq = 1000
 
+port_model = False
+project = False
 project_freq = 10
-port_model = True
 
 class ResuIter:
     def __init__(self, generator_fn):
@@ -45,15 +49,18 @@ val_loader = ResuIter(lambda: val_dataset.iter(batch_size))
 test_loader = None
 
 vocab_size = 28996
-# model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
-#      "n_classes": 2, "dropout": 0.0, "pre_ln": False, "universal": False, "relative": False, 'emb_norm': False,
-#      'custom_ln': False, "causal": True, "append_cls": False, 'autoreg': True, "padding_idx": 0}
 
+# arguments for a standard transformer
 model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
-    "n_classes": 2, "padding_idx": 0, "append_cls": False, "autoreg": True, 'extra_connections': [("ff_1", "attn_3")]}
+     "n_classes": 2, "dropout": 0.0, "pre_ln": False, "universal": False, "relative": False, 'emb_norm': False,
+     'custom_ln': False, "causal": True, "append_cls": False, 'autoreg': True, "padding_idx": 0}
 
-model_class = NodeLayerTransformer
-#model_class = Transformer
+# arguments for a NodeLayerTransformer
+# model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
+#     "n_classes": 2, "padding_idx": 0, "append_cls": False, "autoreg": True, 'extra_connections': []}
+
+model_class = Transformer
+#model_class = NodeLayerTransformer
 
 loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -81,7 +88,15 @@ def compute_scores(model, batch, split='train'):
             start_acc = (start_logits.argmax(dim=1) == batch['start_positions']).to(torch.float).mean().item()
             end_acc = (end_logits.argmax(dim=1) == batch['end_positions']).to(torch.float).mean().item()
 
-        return loss, {f'{split}/cross_entropy': loss.item(), f'{split}/acc': 0.5*(start_acc+end_acc)}, None
+        scores = {f'{split}/cross_entropy': loss.item(), f'{split}/acc': 0.5*(start_acc+end_acc)}
+
+        if hasattr(model, 'node_layers'):
+            scores['train/forward_i'] = model.node_layers.forward_iter_info['i']
+            scores['train/forward_err'] = model.node_layers.forward_iter_info['error']
+            if hasattr(model.node_layers, 'backward_iter_info'):
+                scores['train/bckward_i'] = model.node_layers.backward_iter_info['i']
+                scores['train/bckward_err'] = model.node_layers.backward_iter_info['error']
+        return (loss, scores, None)
 
     if split == "val":
         start_logits = start_logits.detach().cpu().numpy()

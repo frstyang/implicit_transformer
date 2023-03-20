@@ -16,13 +16,13 @@ def custom_layer_norm(x, n_layer_norms=1):
     return x
 
 
-def picard(fn, A, B, U, max_iter=50, tol=1e-3, output_size=None, fn_kwargs={}):
+def picard(fn, A, B, U, max_iter=100, tol=1e-3, output_size=None, fn_kwargs={}):
     if output_size is None:
         output_size = U.shape
 
     fn = partial(fn, **fn_kwargs)
 
-    X = torch.zeros(output_size, device=U.device)
+    X = torch.zeros(output_size, device=U.device, dtype=U.dtype)
     for i in range(max_iter):
         X_prev = X
         X = fn(A, B, X, U)
@@ -154,7 +154,7 @@ def transformer_fn2(A, B, X, U, src_mask, n_heads, n_layer_norms, relu_dim, ln_d
 class ITFn2(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, A, W_qkv, b, U, src_mask, n_heads, n_layer_norms, relu_dim, ln_dim, dim, emb_dim):
+    def forward(ctx, A, W_qkv, b, U, src_mask, n_heads, n_layer_norms, relu_dim, ln_dim, dim, emb_dim, jac_reg):
         output_size = (U.shape[0], U.shape[1], relu_dim + ln_dim + dim)
         kwargs = {'src_mask': src_mask, 'n_heads': n_heads, 'n_layer_norms': n_layer_norms,
         'relu_dim': relu_dim, 'ln_dim': ln_dim, 'dim': dim, 'emb_dim': emb_dim}
@@ -162,6 +162,7 @@ class ITFn2(torch.autograd.Function):
             X = picard(transformer_fn2, A, (W_qkv, b), U, fn_kwargs=kwargs, output_size=output_size)
         ctx.save_for_backward(A, W_qkv, b, X, U)
         ctx.kwargs = kwargs
+        ctx.jac_reg = jac_reg
         return X
 
     @staticmethod
@@ -171,7 +172,8 @@ class ITFn2(torch.autograd.Function):
         """
         A, W_qkv, b, X, U = ctx.saved_tensors
         grad_transformed = torch.zeros_like(X)
-        # conduct a picard iteration so grad_transformed equals dL/dX (I - \partial f/\partial X)^{-1}
+        # conduct a picard iteration so grad_transformed equals g_t = dL/dX (I - \partial f/\partial X)^{-1}
+        # using the fact that g_t = g_t \partial f/\partial x + dL/dX
         A = A.detach().clone()
         W_qkv = W_qkv.detach().clone()
         b = b.detach().clone()
@@ -195,11 +197,28 @@ class ITFn2(torch.autograd.Function):
         A = A.requires_grad_()
         W_qkv = W_qkv.requires_grad_()
         b = b.requires_grad_()
-        X = X.detach()
+        if not ctx.jac_reg:
+            X = X.detach()
+        X = X.requires_grad_()
         U = U.requires_grad_()
         with torch.enable_grad():
             out = transformer_fn2(A, (W_qkv, b), X, U, **ctx.kwargs)
-        out.backward(grad_transformed)
+        if not ctx.jac_reg:
+            out.backward(grad_transformed)
+
+        if ctx.jac_reg:
+            def normalize(x):
+                return x / x.norm(dim=2, keepdim=True)
+            w = normalize(torch.normal(0, 1, X.shape, device=X.device))
+            wJ = torch.autograd.grad(out, X, w, create_graph=True)[0]
+            def norm(x):
+                return (x**2).sum(dim=2)**(0.5)
+            with torch.enable_grad():
+                nwJ = norm(wJ)
+                lse = torch.logsumexp(nwJ, dim=1)
+                j_reg = 10*lse.mean()
+
+            torch.autograd.backward((out, j_reg), (grad_transformed, None))
 
         return A.grad, W_qkv.grad, b.grad, U.grad, None, None, None, None,\
             None, None, None, None, None, None, None # fill with Nones in case **kwargs is nonempty

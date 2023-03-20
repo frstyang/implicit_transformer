@@ -57,6 +57,7 @@ def preprocess_wikitext(wikitext):
     return sentences
 
 def get_tokenizer():
+    # Taken from https://huggingface.co/docs/tokenizers/quicktour
     if os.path.exists("cache/wikitext-103/wikitext-103-tokenizer.json"):
         return Tokenizer.from_file("cache/wikitext-103/wikitext-103-tokenizer.json")
     print("cache/wikitext-103/wikitext-103-tokenizer.json does not exist, creating tokenizer")

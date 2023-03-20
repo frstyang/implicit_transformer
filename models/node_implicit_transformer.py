@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from utils import dfs, get_back_edges, check_topo_order
+
 class NodeLayer(ABC, nn.Module):
     def __init__(self, name, out_dim):
         super().__init__()
@@ -39,7 +41,7 @@ from functools import reduce
 def reduce_sum(tensor_list):
     return reduce(lambda a, b: a+b, tensor_list)
 
-class ReLULayer(NodeLayer):
+class FFLayer(NodeLayer):
     def __init__(self, name, out_dim, ff_dim):
         super().__init__(name, out_dim)
         self.ff_dim = ff_dim
@@ -50,7 +52,7 @@ class ReLULayer(NodeLayer):
         return nn.Linear(node.out_dim, self.ff_dim)
     
     def forward(self, X, *args, **kwargs):
-        mapped_inputs = [self.input_maps[name](X[name]) for name in self.input_names]
+        mapped_inputs = [self.input_maps[name](X[name]) for name in self.input_names if name in X]
         out1 = torch.relu(reduce_sum(mapped_inputs))
         out2 = self.linear2(out1)
         return self.layer_norm(out2 + X[self.input_names[0]])
@@ -66,7 +68,7 @@ class AttentionLayer(NodeLayer):
         return nn.Linear(node.out_dim, 3*self.out_dim, bias=False)
     
     def forward(self, X, src_mask=None, *args, **kwargs):
-        mapped_inputs = [self.input_maps[name](X[name]) for name in self.input_names]
+        mapped_inputs = [self.input_maps[name](X[name]) for name in self.input_names if name in X]
         x = reduce_sum(mapped_inputs)
         x = rearrange(x, 'b s (n_h d) -> (b n_h) s d', n_h=self.n_heads)
         q, k, v = x.chunk(3, dim=2)
@@ -112,7 +114,7 @@ class NodeLayerTransformer(nn.Module):
         self.node_layers = nn.ModuleDict({'input': InputNode(dim)})
         for i in range(n_layers):
             self.node_layers[f'attn_{i}'] = AttentionLayer(f'attn_{i}', dim, n_heads)
-            self.node_layers[f'ff_{i}'] = ReLULayer(f"ff_{i}", dim, ff_dim)
+            self.node_layers[f'ff_{i}'] = FFLayer(f"ff_{i}", dim, ff_dim)
             if i == 0:
                 self.node_layers[f'attn_{i}'].connect(self.node_layers['input'])
             else:
@@ -121,6 +123,15 @@ class NodeLayerTransformer(nn.Module):
 
         for node1, node2 in extra_connections:
             self.node_layers[node2].connect(self.node_layers[node1])
+
+        self.visited, self.post_nums, self.pre_nums = dfs(self.node_layers)
+        self.back_edges = get_back_edges(self.node_layers, self.post_nums)
+        if self.is_dag:
+            assert check_topo_order(self.node_layers, self.post_nums)
+
+    @property
+    def is_dag(self):
+        return len(self.back_edges) == 0
         
     def forward(self, x, seq_lens=None, src_mask=None):
         # x: (batch_size, max_seq_len)
@@ -133,9 +144,8 @@ class NodeLayerTransformer(nn.Module):
         if src_mask is None:
             pos = torch.arange(0, x.shape[1], device=x.device)
             src_mask = seq_lens[:, None] + self.append_cls <= pos
-        #return x, src_mask
-        X = ComputeGraph.apply(self.node_layers, {'src_mask': src_mask}, x, *self.node_layers.parameters())
-        #return X
+        X = ComputeGraph.apply(1e-5, 20, self.is_dag, self.node_layers,
+                               {'src_mask': src_mask}, x, *self.node_layers.parameters())
         X = OrderedDict((name, v) for name, v in zip(self.node_layers.keys(), X))
         x = X[f'ff_{self.n_layers - 1}']
         if self.autoreg:
@@ -153,23 +163,49 @@ def graph_forward(node_layers, X, dynamic=True, *args, **kwargs):
         elif dynamic and name in X:
             X[name].data.copy_(out[name].data)
     return out
+
+def err(node_outs1, node_outs2):
+    diff = 0
+    for key in node_outs1:
+        diff = max(diff, (node_outs1[key] - node_outs2[key]).abs().max())
+    return float(diff)
     
 class ComputeGraph(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, node_layers, node_kwargs, x, *params):
+    def forward(ctx, tol, max_iter, is_dag, node_layers, node_kwargs, x, *params):
         X = OrderedDict(input=x.detach().clone())
-        node_layers = copy.deepcopy(node_layers)
-        for p in node_layers.parameters(): p.requires_grad = False
+        names = list(node_layers.keys())
+        node_layers_copy = copy.deepcopy(node_layers)
+        for p in node_layers_copy.parameters(): p.requires_grad = False
+        converged = is_dag # if not a DAG, check for convergence
+        error = 0
         with torch.enable_grad():
-            out = graph_forward(node_layers, X, **node_kwargs)
+            for i in range(max_iter):
+                for name in list(X.keys())[1:]:
+                    X[name] = X[name].detach().clone().requires_grad_()
+                out = graph_forward(node_layers_copy, X, **node_kwargs)
+                if is_dag:
+                    break
+                if i >= 1:
+                    with torch.no_grad():
+                        error = err(out, prev_out)
+                    if error <= tol:
+                        converged = True
+                        break
+                prev_out = out
+        node_layers.forward_iter_info = {'i': i, 'error': error, 'converged': converged}
         ctx.save_for_backward(*out.values(), *X.values(), *node_layers.parameters())
         ctx.node_layers = node_layers
+        ctx.node_layers_copy = node_layers_copy
         ctx.node_kwargs = node_kwargs
+        ctx.max_iter = max_iter
+        ctx.is_dag = is_dag
+        ctx.tol = tol
         return tuple([x.detach().clone().requires_grad_() for x in out.values()])
 
     @staticmethod
     def backward(ctx, *node_grads):
-        node_layers, node_kwargs = ctx.node_layers, ctx.node_kwargs
+        node_layers, node_kwargs = ctx.node_layers_copy, ctx.node_kwargs
         out_X_and_params = ctx.saved_tensors
         names = list(node_layers.keys())
         out = OrderedDict((name, tens) for name, tens in zip(names, out_X_and_params[:len(names)]))
@@ -178,14 +214,35 @@ class ComputeGraph(torch.autograd.Function):
         node_grads = OrderedDict((name, grad) for name, grad in zip(names, node_grads))
 
         new_node_grads = OrderedDict()
-        for name in reversed(names[1:]):
-            if X[name].grad is None:
-                new_node_grads[name] = node_grads[name]
-            else:
-                new_node_grads[name] = node_grads[name] + X[name].grad
-            if out[name].requires_grad:
-                torch.autograd.backward(out[name], new_node_grads[name], retain_graph=True)
+        error = 0
+        converged = ctx.is_dag # if not a DAG, check for convergence
+        for i in range(ctx.max_iter):
+            for name in reversed(names[1:]):
+                X[name].grad = None
+                children = node_layers[name].output_names
+                child_outs = []
+                grads = []
+                for child in children:
+                    if out[child].requires_grad and child in new_node_grads:
+                        child_outs.append(out[child])
+                        grads.append(new_node_grads[child])
+                if len(child_outs) > 0:
+                    torch.autograd.backward(child_outs, grads, retain_graph=True)
+                if X[name].grad is None:
+                    new_node_grads[name] = node_grads[name]
+                else:
+                    new_node_grads[name] = node_grads[name] + X[name].grad
+            if ctx.is_dag:
+                break
 
+            if i >= 1:
+                error = err(new_node_grads, prev_new_node_grads)
+                if error <= ctx.tol:
+                    converged = True
+                    break
+            prev_new_node_grads = copy.copy(new_node_grads)
+
+        ctx.node_layers.backward_iter_info = {'i': i, 'error': error, 'converged': converged}
         torch.autograd.backward(out['input'].requires_grad_(), torch.zeros_like(out['input']), retain_graph=False)
         
         for name in names[1:]: # still need to produce a gradient w.r.t. the input, x
@@ -197,7 +254,7 @@ class ComputeGraph(torch.autograd.Function):
             out = graph_forward(node_layers, X, False, **node_kwargs)
                 
         torch.autograd.backward(list(out.values())[1:], reversed(new_node_grads.values()))
-        return None, None, X['input'].grad, *map(lambda p: p.grad, node_layers.parameters())
+        return None, None, None, None, None, X['input'].grad, *map(lambda p: p.grad, node_layers.parameters())
 
 def transfer(m1, m2):
     for p1, p2 in zip(m1.parameters(), m2.parameters()):
