@@ -28,7 +28,7 @@ test_val_freq = 1000
 do_compile_eval = True
 model_checkpoint_freq = 1000
 
-port_model = False
+port_model = True
 project = False
 project_freq = 10
 
@@ -51,10 +51,9 @@ test_loader = None
 vocab_size = 28996
 
 model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
-     "n_classes": 2, "dropout": 0.0, "pre_ln": False, "universal": False, "relative": False, 'emb_norm': False,
-     'custom_ln': False, "causal": True, "append_cls": False, 'autoreg': True, "padding_idx": 0}
+    "n_classes": 2, "padding_idx": 0, "append_cls": False, "autoreg": True, 'extra_connections': []}
 
-model_class = Transformer
+model_class = NodeLayerTransformer
 
 loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -105,3 +104,10 @@ def evaluate(outputs, split='val'):
     start_logits, end_logits = outputs
     metrics = compute_metrics(start_logits, end_logits, val_dataset, raw_val_dataset)
     return {f"{split}/{k}": v for k,v in metrics.items()}
+
+port_model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
+     "n_classes": 2, "dropout": 0.0, "pre_ln": False, "universal": False, "relative": False, 'emb_norm': False,
+     'custom_ln': False, "causal": True, "append_cls": False, 'autoreg': True, "padding_idx": 0}
+
+port_model_class = Transformer
+port_model_fn = lambda t, nlt: t_to_nlt(t, nlt, 6)

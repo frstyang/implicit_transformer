@@ -21,7 +21,7 @@ model_checkpoint_freq = 1000
 do_test_loop = True
 
 port_model = False
-project = False
+project = True
 project_freq = 20
 
 train_dataset = PlaceValueDataset()
@@ -34,12 +34,11 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=colla
 val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
-# Arguments for standard transformer. For best results on the extrapolate set, set relative and universal to True.
-model_kwargs = {"dim": 256, "n_layers": 6, "n_heads": 8, "ff_dim": 1024, "vocab_size": len(train_dataset.vocabulary),
-     "n_classes": 10, "dropout": 0.1, "pre_ln": False, "universal": False, "relative": False, 'implicit': False, 
-     'emb_norm': False, 'custom_ln': False}
+Arguments for implicit transformer.
+model_kwargs = {"relu_dim": 768, "ln_dim": 512, "dim": 512, "emb_dim": 256, "n_heads": 32,
+    "vocab_size": len(train_dataset.vocabulary), "n_classes": 10, "n_layer_norms": 4, "n_relu_heads": 4, "jac_reg": True}
 
-model_class = Transformer
+model_class = ImplicitTransformer
 
 loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -54,3 +53,9 @@ def compute_scores(model, batch, split='train'):
     loss = loss_fn(logits, y)
     acc = (logits.argmax(dim=1) == y).sum() / len(y)
     return loss, {f'{split}/cross_entropy': loss.item(), f'{split}/acc': acc.item()}, None
+
+def port_model_fn(model_to_port, model):
+    model_to_port.load_state_dict(
+        torch.load(config.port_model_ckpt)['model_state_dict']
+    )
+    model.port_transformer(port_model_kwargs['dim'], port_model_kwargs['ff_dim'], port_model_kwargs['n_layers'], model_to_port)
