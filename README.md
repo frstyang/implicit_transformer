@@ -33,9 +33,9 @@ The model detects if the underlying graph is a DAG (i.e., strictly upper triangu
 Adding the single connection `(ff_3, attn_1)` to make the model implicit results in unstable training, and performance suffers as a result. As training progresses, the forward and backward pass start to always hit the iteration limit and do not converge. With that single connection, the model is already "too implicit" (hypothetically, the Perron-Frobenius norm is too large) to train without regularization or constraint. Perhaps connecting layers that are more adjacent, or "lightening" the connection somehow could help.
 [Performance curves](https://api.wandb.ai/links/forestyang/pr1279v2)
 
-To run the standard transformer in the first experiment, run `python main.py --config configs/squad_transformer.py`. To run the node layer transformer, run `python main.py--config configs/squad_node_layer_transformer.py`.
+To train the standard transformer in the first experiment, run `python main.py --config configs/squad_transformer.py`. To train the node layer transformer, run `python main.py --config configs/squad_node_layer_transformer.py`.
 
-To train the `NodeLayerTransformer` in the second experiment, set `extra_connections` to `[(ff_3, attn_1)]`. Any desired extra connections may be passed as a list of tuples of the form `(u, v)` where `u` is the name of the node that is to be connected, i.e. feed into, the node named `v`. The node layer transformer with `n_layers=6` has nodes `attn_0, ff_0, ... attn_5, ff_5`.
+To train the `NodeLayerTransformer` in the second experiment, set `extra_connections` to `[(ff_3, attn_1)]` in `configs/squad_node_layer_transformer.py`. Any desired extra connections may be passed as a list of tuples of the form `(u, v)` where `u` is the name of the node that is to be connected, i.e. feed into, the node named `v`. The node layer transformer with `n_layers=6` has nodes `attn_0, ff_0, ... attn_5, ff_5`.
 
 **WikiText-103**: a standard transformer with the settings in `configs/wikitext103_transformer.py` fluctuates around 50 test perplexity after training for 25k iterations.
 [Performance curve](https://api.wandb.ai/links/forestyang/a78hzo4i)
