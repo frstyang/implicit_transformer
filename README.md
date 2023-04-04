@@ -59,13 +59,6 @@ Finally, this repo uses wandb to conveniently log and plot runs in real time. Cr
 
 ## Instructions for downloading datasets
 ### SQuAD
-The Stanford Question-Answering Dataset (SQuAD) consists of question-passage pairs where the goal is to determine where the answer begins and ends in the passage. The dataset tokenization, preprocessing, and evaluation are taken from https://huggingface.co/course/chapter7/7?fw=tf. 
-An example input text may look like
-```
-[CLS] What is the Grotto at Notre Dame? [SEP] it, is a copper statue of Christ with arms upraised with the legend " Venite Ad Me Omnes ". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette So [SEP]
-```
-where the question is separated from the passage by a `[SEP]` token. In this case, the 64th to 70th tokens of the input text contain the answer, `'a Marian place of prayer and reflection'`, so the model will try to assign a high probability to the 64th token of being the start token and a high probability of being the end token to the 70th token.
-
 Download `train-v2.0.json` and `dev-v2.0.json` from https://rajpurkar.github.io/SQuAD-explorer/ by clicking on the buttons labeled "Training Set v2.0 (40 MB)" and "Dev Set v2.0 (4 MB)". Move these files to `cache/SQuAD`. In the end, the directory layout should look like:
 ```
 cache/SQuAD/
@@ -73,16 +66,6 @@ cache/SQuAD/
     dev-v2.0.json
 ```
 ### WikiText-103
-Text extracted from Wikipedia used for language modeling, where the task is to predict the next token. For example, the first 400 characters of the training set are:
-```
-= Valkyria Chronicles III = 
-
-  Senjō no Valkyria 3 : Unrecorded Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series .
-```
-   The tokenizer, taken from https://huggingface.co/docs/tokenizers/quicktour, uses a Byte-Pair Encoding and tokenizes the previous text into the following 103 tokens separated by spaces:
-```
-   = V alk y ria Chronicles III = Sen j ō no V alk y ria 3 : Un recorded Chronicles ( Japanese : 戦 場 の ヴ ァ ル キ ュ リ ア 3 , lit . V alk y ria of the Battle field 3 ) , commonly referred to as V alk y ria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media . Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the V alk y ria series .
-```
    Download the raw WikiText-103 data here: https://blog.salesforceairesearch.com/the-wikitext-long-term-dependency-language-modeling-dataset/. Scroll down to the link that says "Download WikiText-103 raw character level data" and click to download.
    Then, extract the contents of the downloaded zip file into the `cache/raw` directory in this repository. If this directory does not exist, create it. In the end, the directory layout should look like this:
 ```
@@ -94,11 +77,6 @@ cache/raw/
 ```
 
 ### Place Value Dataset
-This dataset contains examples of the form:
-Input: What is the millions digit of 9967193?
-Output: 9
-
-The setup of this dataset is based on https://github.com/robertcsordas/transformer_generalization.
 Download the mathematics_dataset-v1.0 folder from [here](https://drive.google.com/drive/folders/1PDcNYAkqEbQP-k5do1YohczgHtQGl8mM?usp=share_link) and move it to the `cache` directory in this repository. The directory layout should look like:
 ```
 cache/dm_math/mathematics_dataset-v1.0/
@@ -108,3 +86,29 @@ cache/dm_math/mathematics_dataset-v1.0/
     train-hard/
     train-medium/
 ```
+## Dataset descriptions
+### SQuAD
+The Stanford Question-Answering Dataset (SQuAD) consists of question-passage pairs where the goal is to determine where the answer begins and ends in the passage. The dataset tokenization, preprocessing, and evaluation are taken from https://huggingface.co/course/chapter7/7?fw=tf. 
+An example input text may look like
+```
+[CLS] What is the Grotto at Notre Dame? [SEP] it, is a copper statue of Christ with arms upraised with the legend " Venite Ad Me Omnes ". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette So [SEP]
+```
+where the question is separated from the passage by a `[SEP]` token. In this case, the 64th to 70th tokens of the input text contain the answer, `'a Marian place of prayer and reflection'`, so the model will try to assign a high probability to the 64th token of being the start token and a high probability of being the end token to the 70th token.
+
+### WikiText-103
+Text extracted from Wikipedia used for language modeling, where the task is to predict the next token. For example, the first 400 characters of the training set are:
+```
+= Valkyria Chronicles III = 
+
+  Senjō no Valkyria 3 : Unrecorded Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series .
+```
+   The tokenizer, taken from https://huggingface.co/docs/tokenizers/quicktour, uses a Byte-Pair Encoding and tokenizes the previous text into the following 103 tokens separated by spaces:
+```
+   = V alk y ria Chronicles III = Sen j ō no V alk y ria 3 : Un recorded Chronicles ( Japanese : 戦 場 の ヴ ァ ル キ ュ リ ア 3 , lit . V alk y ria of the Battle field 3 ) , commonly referred to as V alk y ria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media . Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the V alk y ria series .
+```
+### Place Value Dataset
+This dataset contains examples of the form:
+Input: What is the millions digit of 9967193?
+Output: 9
+
+The setup of this dataset is based on https://github.com/robertcsordas/transformer_generalization.
