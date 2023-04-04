@@ -1,42 +1,50 @@
+
 # README
 This repository implements a standard transformer, work-in-progress versions of an implicit transformer along with a training script that can be applied to various datasets. Instructions for downloading the necessary files for each dataset are given below.
 
-To train on any dataset, run `python --config configs/{dataset_name}.py`. Model specifications such as the width, depth, transformer class, and training hyperparameters can be set by directly modifying the config file specified after `--config`.
+To train on any dataset, run `python main.py --config configs/{config_file}`. Model specifications such as the width, depth, transformer class, and training hyperparameters can be set by directly modifying the specified config.
 
 ## Models
 `Transformer`: this is a standard transformer, implemented in `models/transformer.py`.
 
-`ImplicitTransformer`: an implicit transformer that divides its state vector into `n_relu_heads` blocks of size `relu_dim` output by the ReLU activation, `n_layer_norms` blocks of size `ln_dim` output by the LayerNorm activation (with adjusted normalization constant to ensure Lipschitz-ness), and `n_heads` blocks of size `dim` output by the Attention activation $T(Q, K, V) = V\, \mathrm{softmax}(K^T Q)$ (here sequence elements are columns). This model, its picard iteration-based forward and backward pass, and its projection algorithm for well-posedness are implemented in `models/implicit_transformer.py`, `models/implicit_transformer_function.py`, and `models/projection.py`.
+`ImplicitTransformer`: an implicit transformer that divides its state vector into `n_relu_heads` ReLU blocks of size `relu_dim`, `n_layer_norms` LayerNorm blocks of size `ln_dim`, and `n_heads` Attention blocks of size `dim`. This model, its picard iteration-based forward and backward pass, and its projection algorithm for well-posedness are implemented in `models/implicit_transformer.py`, `models/implicit_transformer_function.py`, and `models/projection.py`.
 
-`NodeLayerTransformer`: a transformer constructed from `NodeLayer` modules. Each layer becomes a node in a directed graph. The transformer is constructed by specifying the connections in the graph. Currently, `FFLayer` and `AttentionLayer` node layers are implemented. For example, a standard transformer block computes the following:
+`NodeLayerTransformer`: a transformer composed of `NodeLayer` modules. A `NodeLayer` represents a layer as a node in a directed graph. The architecture is completed by specifying the connections in the graph. Currently, `FFLayer` and `AttentionLayer` node layers are implemented. A standard transformer block computes the following:
 ```
-# input to transformer block: x
+# transformer block: attention block -> ff block
+# attention block
 attn_in = W_qkv(x)
 out = multi_head_attention(attn_in)
 x = layer_norm(x + out)
 
+# ff block
 ff_in = W_1@x + b_1
 out = W_2@relu(ff_in) + b_2
 x = layer_norm(x + out)
 ```
-The above computation is captured inside a `NodeLayerTransformer` by constructing an `AttentionLayer` and an `FFLayer` and connecting them with `attention_layer.connect(ff_layer)`. A standard transformer can be instantiated by connecting the nodes in a straight line. If a loop is added, the model becomes an implicit transformer. Extra connections can be added using the `extra_connections` argument, e.g. `extra_connections = [(ff_3, attn_1)]` would result in a loop from the 4th `FFLayer` connecting back to the 2nd `AttentionLayer`.
-The model detects if the underlying graph is a DAG (i.e., strictly upper triangular), and if so, runs a single forward and backward computation through the network in topological order. This is equivalent to a standard forward/backward pass. If a cycle is detected, picard iteration is run instead, which repeats forward/backward computations until convergence or reaching a maximum number of iterations. The model is implemented in `models/node_implicit_transformer.py`.
+The above computation is represented inside a `NodeLayerTransformer` by instantiating an `AttentionLayer` and an `FFLayer` and connecting them with `attention_layer.connect(ff_layer)`. A standard transformer consists of a linear chain of these blocks. If a loop is added, the model becomes an implicit transformer. Extra connections can be added using the `extra_connections` argument. For example, `extra_connections = [(ff_3, attn_1)]` results in a loop from the 4th `FFLayer` connecting back to the 2nd `AttentionLayer`.
+The model detects if the underlying graph is a DAG (i.e., strictly upper triangular `A` matrix), and if so, runs a single forward and backward computation through the network in topological order. This is equivalent to a standard forward/backward pass. If a cycle is detected, picard iteration is run instead, which repeats forward/backward computations until convergence or reaching a maximum number of iterations. The model is implemented in `models/node_implicit_transformer.py`.
 
 
 ## Results
-**SQuAD**: Training a standard transformer (labeled `transformer_causal_seed0_0`), and training the same architecture and initialization ported to a node layer transformer (`nlt_causal_seed0_0`) obtain the same performance, as shown [here](https://api.wandb.ai/links/forestyang/dxux823e) on SQuAD. This is a sanity check for the correctness of the node layer transformer implementation in the non-implicit case.
+**SQuAD**: Training a standard transformer (labeled `transformer_causal_seed0_0`), and training the same architecture and initialization ported to a node layer transformer (`nlt_causal_seed0_0`) obtain the same performance on SQuAD. This is a sanity check for the node layer transformer implementation in the non-implicit case.
+[Performance curves](https://api.wandb.ai/links/forestyang/dxux823e)
 
-Adding the single connection `(ff_3, attn_1)` to make the model implicit results in unstable training, and performance suffers as a result. Shown [here](https://api.wandb.ai/links/forestyang/pr1279v2) are the number of iterations the forward and backward pass took to converge or hit the max iteration limit of 20. As training progresses, the forward and backward pass start to always hit the iteration limit and do not converge. With that single connection, the model is already "too implicit" (hypothetically, the Perron-Frobenius norm is too large) to train without regularization or constraint. Perhaps connecting layers that are more adjacent, or "lightening" the connection somehow could help.
+Adding the single connection `(ff_3, attn_1)` to make the model implicit results in unstable training, and performance suffers as a result. As training progresses, the forward and backward pass start to always hit the iteration limit and do not converge. With that single connection, the model is already "too implicit" (hypothetically, the Perron-Frobenius norm is too large) to train without regularization or constraint. Perhaps connecting layers that are more adjacent, or "lightening" the connection somehow could help.
+[Performance curves](https://api.wandb.ai/links/forestyang/pr1279v2)
 
-Either experiment can be run with `configs/squad_transformer.py` by commenting out the lines setting `model_kwargs` to node layer transformer arguments and the line setting the model class to `NodeLayerTransformer`, and including the lines setting `model_kwargs` to standard transformer arguments and the line setting the model class to `Transformer`, or vice-versa. Additionally, when training the standard transformer, `port_model` should be set to `False` whereas when training the node layer transformer, `port_model` should be set to `True`. To train a `NodeLayerTransformer` with extra connections, pass the desired extra connections as a list of tuples of the form `(u, v)` where `u` is the name of the node that is to be connected, i.e. feed into, the node named `v`.
+To run the standard transformer in the first experiment, run `python main.py --config configs/squad_transformer.py`. To run the node layer transformer, run `python main.py--config configs/squad_node_layer_transformer.py`.
 
-**WikiText-103**: a standard transformer with the settings in `configs/wikitext103_transformer.py` fluctuates around 50 test perplexity after training for 25k iterations. [Performance curve](https://api.wandb.ai/links/forestyang/a78hzo4i)
+To train the `NodeLayerTransformer` in the second experiment, set `extra_connections` to `[(ff_3, attn_1)]`. Any desired extra connections may be passed as a list of tuples of the form `(u, v)` where `u` is the name of the node that is to be connected, i.e. feed into, the node named `v`. The node layer transformer with `n_layers=6` has nodes `attn_0, ff_0, ... attn_5, ff_5`.
 
-**Place Value Dataset**: a standard transformer with the settings in `configs/place_value_transformer.py` quickly reaches 0 training error and 100% training accuracy. The test accuracy however is limited to ~20%. Training with `relative=True` (relative positional embeddings) and `universal=True` ([universal transformers](https://arxiv.org/abs/1807.03819)) increases test accuracy to ~85%. This was observed in https://arxiv.org/abs/2108.12284. [Performance curves](https://api.wandb.ai/links/forestyang/jlme0ixh)
+**WikiText-103**: a standard transformer with the settings in `configs/wikitext103_transformer.py` fluctuates around 50 test perplexity after training for 25k iterations.
+[Performance curve](https://api.wandb.ai/links/forestyang/a78hzo4i)
 
-Training an `ImplicitTransformer` with the implicit transformer settings in `configs/place_value_transformer.py` and `project` set to `True` obtains these [curves](https://api.wandb.ai/links/forestyang/zxn41eq6). Looking at the training cross entropy, every time projection occurs, which is every 20 iterations, the loss shoots back up. This suggests that the projection algorithm is imposing too stringent of a constraint on the model.
+**Place Value Dataset**: a standard transformer with `configs/place_value_transformer.py` quickly reaches 0 training error and 100% training accuracy. The test accuracy however is limited to ~20%. Training with `relative=True` (relative positional embeddings) and `universal=True` ([universal transformers](https://arxiv.org/abs/1807.03819)) increases test accuracy to ~85%. This was observed in https://arxiv.org/abs/2108.12284. 
+[Performance curves](https://api.wandb.ai/links/forestyang/jlme0ixh)
 
-
+Training an `ImplicitTransformer` with `configs/place_value_implicit_transformer.py` causes the loss to shoot back up every time projection occurs, which is every 20 iterations. This suggests that the projection algorithm is imposing too stringent of a constraint on the model.
+[Performance curves](https://api.wandb.ai/links/forestyang/zxn41eq6)
 
 ## Requirements
 You will need the standard `numpy`, `torch` (preferably with cuda available), `einops`,`tqdm`, and `scikit-learn`packages.
