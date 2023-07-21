@@ -1,5 +1,7 @@
 import argparse
+import datetime
 import importlib
+import os
 import sys
 
 import numpy as np
@@ -10,7 +12,6 @@ import wandb
 from einops import rearrange, repeat
 from sklearn.decomposition import TruncatedSVD
 
-CHECKPOINT_PATH = "./checkpoint.pt"
 def wandb_log(scores):
     if len(scores) > 0:
         wandb.log(scores)
@@ -20,10 +21,12 @@ if __name__ == "__main__":
     parser.add_argument("--config")
     args = parser.parse_args()
 
+    # load config
     spec = importlib.util.spec_from_file_location("config", args.config)
     config = importlib.util.module_from_spec(spec)
     sys.modules["config"] = config
     spec.loader.exec_module(config)
+
     train_loader = config.train_loader
     val_loader = config.val_loader
     test_loader = config.test_loader
@@ -52,11 +55,21 @@ if __name__ == "__main__":
 
     optim = torch.optim.Adam(model.parameters(), config.lr)
 
-    wandb.init(project=config.wandb_project, config=config.model_kwargs)
+    if hasattr(config, 'run_name'):
+        run_name = config.run_name
+        run_dir = f"runs/{config.run_name}"
+    else:
+        run_name = None
+        run_dir = datetime.datetime.now().strftime("Run_%Y-%m-%d_%H:%M:%S")
+
+    wandb.init(project=config.wandb_project, config=config.model_kwargs, name=run_name)
     wandb.config.update({'model': config.model_class.__name__,
     'batch_size': config.batch_size, 'num_iters': config.num_iters, 'lr': config.lr})
     wandb.define_metric("train/cross_entropy", summary='min')
     wandb.define_metric("train/acc", summary='max')
+
+    with open(f"{run_dir}/wandb_run_id.txt", "w") as f:
+        f.write(wandb.run.id)
 
     np.random.seed(getattr(config, "NUMPY_SEED", 0))
     torch.manual_seed(getattr(config, "TORCH_SEED", 0))
@@ -91,10 +104,12 @@ if __name__ == "__main__":
                             loss, scores, outputs = config.compute_scores(model, batch, split)
                             split_outputs.append(outputs)
                             val_scores_for_each_batch.append(scores)
-
+                        
+                        # get the mean value of each metric over all val or test batches and 
+                        # store these mean values in a dictionary
                         scores_this_iteration = {k: np.mean([batch_scores[k] for batch_scores
                             in val_scores_for_each_batch]) for k in val_scores_for_each_batch[0].keys()}
-                        if getattr(config, "do_compile_eval", False):
+                        if getattr(config, "do_compile_eval", False) == True:
                             split_outputs = config.compile(split_outputs)
                             metrics = config.evaluate(split_outputs, split)
                             scores_this_iteration.update(metrics)
@@ -105,14 +120,14 @@ if __name__ == "__main__":
             if i % config.model_checkpoint_freq == 0:
                 torch.save(
                     {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict(), monitor_metric: val_metric},
-                    CHECKPOINT_PATH,
+                    f"{run_dir}/checkpoint.pt",
                 )
                 if val_metric > best_val_metric:
                     print(f"{monitor_metric} of {val_metric} at iteration {i} was better than {best_val_metric}, checkpointing")
                     best_val_metric = val_metric
                     torch.save(
                         {'i': i, 'model_state_dict': model.state_dict(), 'optim_state_dict': optim.state_dict(), monitor_metric: val_metric},
-                        './best_checkpoint.pt',
+                        f"{run_dir}/best_checkpoint.pt",
                     )
 
             if i == config.num_iters:
