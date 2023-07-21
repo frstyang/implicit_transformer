@@ -62,11 +62,18 @@ if __name__ == "__main__":
         run_name = None
         run_dir = datetime.datetime.now().strftime("Run_%Y-%m-%d_%H:%M:%S")
 
+    if not os.path.exists(run_dir):
+        os.makedirs(run_dir)
+
     wandb.init(project=config.wandb_project, config=config.model_kwargs, name=run_name)
     wandb.config.update({'model': config.model_class.__name__,
     'batch_size': config.batch_size, 'num_iters': config.num_iters, 'lr': config.lr})
-    wandb.define_metric("train/cross_entropy", summary='min')
-    wandb.define_metric("train/acc", summary='max')
+    if hasattr(config, 'wandb_metrics'):
+        for metric, better_direction in config.wandb_metrics:
+            wandb.define_metric(metric, summary=better_direction)
+    else:
+        wandb.define_metric("train/cross_entropy", summary='min')
+        wandb.define_metric("train/acc", summary='max')
 
     with open(f"{run_dir}/wandb_run_id.txt", "w") as f:
         f.write(wandb.run.id)

@@ -62,12 +62,13 @@ class MultiHeadAttention(nn.Module):
         # src_mask: (batch_size, max_seq_len)
         if x_kv is None:
             x = self.W_qkv(x)
+            q, k, v = rearrange(x, 'b s (c n_h d) -> c (b n_h) s d', n_h=self.n_heads, c=3) 
         else:
             d = self.W_qkv.weight.shape[1]
-            q = nn.functional.linear(x, self.W_qkv.weight[:d], self.W_qkv.bias[:d])
-            kv = nn.functional.linear(x_kv, self.W_qkv.weight[d:], self.W_qkv.bias[d:])
-            x = torch.cat((q, kv), dim=2)
-        q, k, v = rearrange(x, 'b s (c n_h d) -> c (b n_h) s d', n_h=self.n_heads, c=3)
+            q = nn.functional.linear(x, self.W_qkv.weight[:d])
+            kv = nn.functional.linear(x_kv, self.W_qkv.weight[d:])
+            q = rearrange(q, 'b s1 (n_h d) -> (b n_h) s1 d', n_h=self.n_heads)
+            k, v = rearrange(kv, 'b s2 (c n_h d) -> c (b n_h) s2 d', n_h=self.n_heads, c=2)
         logits = torch.bmm(q, k.transpose(1, 2)) * (q.shape[-1]) ** (-0.5)
         # logits.shape: (batch_size*n_heads, max_seq_len, max_seq_len)
         if src_mask is not None:
@@ -111,12 +112,13 @@ class RelativeMultiHeadAttention(MultiHeadAttention):
         b, s, d = x.shape; s = s - 1 # subtract 1 due to cls token
         if x_kv is None:
             x = self.W_qkv(x)
+            q, k, v = rearrange(x, 'b s (c n_h d) -> c b n_h s d', n_h=self.n_heads, c=3) 
         else:
             d = self.W_qkv.weight.shape[1]
-            q = nn.functional.linear(x, self.W_qkv.weight[:d], self.W_qkv.bias[:d])
-            kv = nn.functional.linear(x_kv, self.W_qkv.weight[d:], self.W_qkv.bias[d:])
-            x = torch.cat((q, kv), dim=2)
-        q, k, v = rearrange(x, 'b s (c n_h d) -> c b n_h s d', n_h=self.n_heads, c=3) 
+            q = nn.functional.linear(x, self.W_qkv.weight[:d])
+            kv = nn.functional.linear(x_kv, self.W_qkv.weight[d:])
+            q = rearrange(q, 'b s1 (n_h d) -> b n_h s1 d', n_h=self.n_heads)
+            k, v = rearrange(kv, 'b s2 (c n_h d) -> c b n_h s2 d', n_h=self.n_heads, c=2)
         # add q biases
         q_content = q + self.global_content_bias # (batch_size, n_heads, s + 1, d)
         q_pos = q[:, :, 1:] + self.global_pos_bias # (batch_size, n_heads, s, d)
@@ -179,11 +181,13 @@ class TransformerBlock(nn.Module):
         
         if self.pre_ln:
             x = x + self.dropout1(self.mha(self.norm1(x), src_mask))
-            x = x + self.mha_cross(self.norm_cross(x), src_mask_2, self.norm_cross(x_2))
+            if self.cross:
+                x = x + self.mha_cross(self.norm_cross(x), src_mask_2, self.norm_cross(x_2))
             x = x + self.dropout2(self.ff_layer(self.norm2(x)))
         else:
             x = self.norm1(x + self.dropout1(self.mha(x, src_mask)))
-            x = self.norm_cross(x + self.mha_cross(x, src_mask_2, x_2))
+            if self.cross:
+                x = self.norm_cross(x + self.mha_cross(x, src_mask_2, x_2))
             x = self.norm2(x + self.dropout2(self.ff_layer(x)))
         return x
 
@@ -224,8 +228,7 @@ class Decoder(TransformerModule):
 class Transformer(nn.Module):
     def __init__(self, dim, n_layers, n_heads, ff_dim, vocab_size, n_classes, dropout=0.1,
                  pre_ln=False, universal=False, relative=False, emb_norm=False, custom_ln=False,
-                 causal=False, padding_idx=None, append_cls=True, autoreg=False, decoder=False,
-                 reduce='cls_token'):
+                 causal=False, padding_idx=None, append_cls=True, decoder=False, reduce='cls_token'):
         super().__init__()
         if padding_idx is None:
             self.embedding = nn.Embedding(vocab_size+1, dim, padding_idx=vocab_size)
@@ -244,7 +247,6 @@ class Transformer(nn.Module):
             self.decoder = Decoder(dim, n_layers, n_heads, ff_dim, dropout, pre_ln=pre_ln, universal=universal,
                                    relative=relative, custom_ln=custom_ln)
 
-        self.autoreg = (n_classes == 'auto') or autoreg
         if n_classes == 'auto':
             n_classes = vocab_size
         self.linear = nn.Linear(dim, n_classes)
@@ -253,7 +255,7 @@ class Transformer(nn.Module):
         self.reduce = reduce
         self.inference = False
         
-    def forward(self, x, seq_lens=None, src_mask=None, x_2=None, seq_lens_2=None):
+    def forward(self, x, seq_lens=None, src_mask=None, x_2=None, seq_lens_2=None, inference_n=None):
         """
         x: (batch_size, max_seq_len)
         seq_lens: (batch_size)
@@ -270,10 +272,10 @@ class Transformer(nn.Module):
 
         x = self.encoder(x, src_mask)
         if hasattr(self, 'decoder') and (not self.inference):
-            y = self.decoder(x_2, src_mask_2, x_2=x, src_mask_2=src_mask, inference=False)
+            y = self.decoder(x_2, src_mask_2, x_2=x, src_mask_2=src_mask)
             logits = self.linear(y)
         if hasattr(self, 'decoder') and self.inference:
-            x_out, logits = self.forward_inference(x, src_mask)
+            x_out, logits = self.forward_inference(x, src_mask, n=inference_n)
 
         if not hasattr(self, 'decoder'):
             if self.reduce == 'cls_token':
@@ -288,7 +290,7 @@ class Transformer(nn.Module):
         x = self.embedding(x)
         x = self.emb_dropout(x)
         if not self.relative:
-            x = x = self.pos_emb(x)
+            x = x + self.pos_emb(x)
         if append_cls:
             x = torch.cat((self.cls_token.repeat(len(x), 1, 1), x), dim=1)
         if self.emb_norm:
@@ -302,6 +304,10 @@ class Transformer(nn.Module):
         super(Transformer, self).eval()
         self.inference = True
 
+    def train(self):
+        super(Transformer, self).eval()
+        self.inference = False
+
     def forward_inference(self, x, src_mask, n=None):
         """
         x is the encoded input sequence. Given x, generate an output sequence
@@ -313,19 +319,20 @@ class Transformer(nn.Module):
         until n tokens have been output by the decoder. Then return
         c1c2c3....cn
         """
+        # TODO: add mode for generating until hitting a stop token (assumes the only thing the enc-dec transformer does is the copy task)
         if n is None:
             n = x.shape[1]
-        # TODO: this actually depends on pad_idx, but currently is assumed to be vocab_size
-        x_dec = torch.full((len(x), 1), len(self.embedding.weight) - 1, dtype=torch.long, device=x.device)
-        lengths = torch.ones((len(x),), device=x.device)
-        x_2, src_mask_2 = self.prepare_input(x_dec, lengths, None, False)
-        # TODO: rewrite this loop to avoid redundant computation
-        for i in range(n): 
-            # TODO: replace None with src_mask for x_dec
-            y = self.decoder(x_2, src_mask_2, x, src_mask)
-            logits = self.linear(y) # (b, i + 1, n_classes)
-            token_probs = logits[:, :].softmax(dim=2)
-            x_dec = torch.cat((x_dec, token_probs.argmax(dim=2)[:, None]), dim=1)
-            lengths = lengths + 1
-            x_2, src_mask_2 = self.prepare_input(x_dec, lengths) 
+        with torch.no_grad():
+            # TODO: this actually depends on pad_idx, but currently is assumed to be vocab_size
+            x_dec = torch.full((len(x), 1), len(self.embedding.weight) - 1, dtype=torch.long, device=x.device)
+            lengths = torch.ones((len(x),), device=x.device)
+            x_2, src_mask_2 = self.prepare_input(x_dec, lengths, None, False)
+            # TODO: rewrite this loop to avoid redundant computation
+            for i in range(n):
+                y = self.decoder(x_2, src_mask_2, x, src_mask)
+                logits = self.linear(y) # (b, i + 1, n_classes)
+                token_probs = logits[:, :].softmax(dim=2)
+                x_dec = torch.cat((x_dec, token_probs.argmax(dim=2)[:, None, -1]), dim=1)
+                lengths = lengths + 1
+                x_2, src_mask_2 = self.prepare_input(x_dec, lengths, None, False)
         return x_dec[:, 1:], logits

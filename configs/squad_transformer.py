@@ -14,6 +14,7 @@ NUMPY_SEED = 0
 torch.manual_seed(TORCH_SEED)
 np.random.seed(NUMPY_SEED)
 wandb_project = "SQuAD_transformer"
+run_name = 'brief_squad_test'
 
 batch_size = 32
 num_iters = 50000
@@ -30,7 +31,8 @@ model_checkpoint_freq = 1000
 
 port_model = False
 project = False
-project_freq = 10
+project_freq = 1
+project_val = 2.
 
 class ResuIter:
     def __init__(self, generator_fn):
@@ -52,7 +54,7 @@ vocab_size = 28996
 
 model_kwargs = {"dim": 384, "n_layers": 6, "n_heads": 8, "ff_dim": 1536, "vocab_size": vocab_size,
      "n_classes": 2, "dropout": 0.0, "pre_ln": False, "universal": False, "relative": False, 'emb_norm': False,
-     'custom_ln': False, "causal": True, "append_cls": False, 'autoreg': True, "padding_idx": 0}
+     'custom_ln': False, "causal": True, "append_cls": False, "padding_idx": 0, 'reduce': 'none'}
 
 model_class = Transformer
 
