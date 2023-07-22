@@ -95,7 +95,7 @@ if __name__ == "__main__":
             optim.step()
             optim.zero_grad()
 
-            if getattr(config, 'project') and (i % config.project_freq == 0):
+            if getattr(config, 'project', False) and (i % config.project_freq == 0):
                 model.project(v=v, exact=True)
 
             i += 1
