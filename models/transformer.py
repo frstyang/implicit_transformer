@@ -300,12 +300,12 @@ class Transformer(nn.Module):
             src_mask = seq_lens[:, None] + append_cls <= pos
         return x, src_mask
 
-    def eval(self):
-        super(Transformer, self).eval()
+    def eval(self, *args, **kwargs):
+        super(Transformer, self).eval(*args, **kwargs)
         self.inference = True
 
-    def train(self):
-        super(Transformer, self).eval()
+    def train(self, *args, **kwargs):
+        super(Transformer, self).train(*args, **kwargs)
         self.inference = False
 
     def forward_inference(self, x, src_mask, n=None):
