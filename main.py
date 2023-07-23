@@ -1,5 +1,5 @@
 import argparse
-import datetime
+from datetime import datetime
 import importlib
 import os
 import sys
@@ -19,6 +19,8 @@ def wandb_log(scores):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config")
+    parser.add_argument("--resume_from_ckpt", default="")
+    parser.add_argument("--resume_wandb_run", default="")
     args = parser.parse_args()
 
     # load config
@@ -45,12 +47,11 @@ if __name__ == "__main__":
         model.double()
     if getattr(config, 'cuda', True):
         model.cuda()
-
     if getattr(config, 'port_model', False):
         config.port_model_fn(model_to_port, model)
-
     if getattr(config, 'project', False):
-        v = 0.9
+        v = getattr(config, 'project_val', 0.9)
+        print(f"Project is true, v={v}")
         model.project(v=v, exact=True)
 
     optim = torch.optim.Adam(model.parameters(), config.lr)
@@ -60,12 +61,22 @@ if __name__ == "__main__":
         run_dir = f"runs/{config.run_name}"
     else:
         run_name = None
-        run_dir = datetime.datetime.now().strftime("Run_%Y-%m-%d_%H:%M:%S")
+        run_dir = datetime.now().strftime("Run_%Y-%m-%d_%H:%M:%S")
 
     if not os.path.exists(run_dir):
         os.makedirs(run_dir)
 
-    wandb.init(project=config.wandb_project, config=config.model_kwargs, name=run_name)
+    if args.resume_from_ckpt:
+        checkpoint = torch.load(args.resume_from_ckpt)
+        print(f"Resuming checkpoint from iteration {checkpoint['i']}")
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optim.load_state_dict(checkpoint['optim_state_dict'])
+        i = checkpoint['i']
+
+    if args.resume_wandb_run:
+        wandb.init(project=config.wandb_project, config=config.model_kwargs, resume='allow', id=args.resume_wandb_run)
+    else:
+        wandb.init(project=config.wandb_project, config=config.model_kwargs, name=run_name)
     wandb.config.update({'model': config.model_class.__name__,
     'batch_size': config.batch_size, 'num_iters': config.num_iters, 'lr': config.lr})
     if hasattr(config, 'wandb_metrics'):
@@ -82,7 +93,7 @@ if __name__ == "__main__":
     torch.manual_seed(getattr(config, "TORCH_SEED", 0))
 
     i = 0
-    
+
     assert config.model_checkpoint_freq % config.test_val_freq == 0
     monitor_metric = getattr(config, 'monitor_metric', 'val/acc')
     best_val_metric = 0

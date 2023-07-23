@@ -275,7 +275,7 @@ class Transformer(nn.Module):
             y = self.decoder(x_2, src_mask_2, x_2=x, src_mask_2=src_mask)
             logits = self.linear(y)
         if hasattr(self, 'decoder') and self.inference:
-            x_out, logits = self.forward_inference(x, src_mask, n=inference_n)
+            logits = self.forward_inference(x, src_mask, n=inference_n)
 
         if not hasattr(self, 'decoder'):
             if self.reduce == 'cls_token':
@@ -308,7 +308,7 @@ class Transformer(nn.Module):
         super(Transformer, self).train(*args, **kwargs)
         self.inference = False
 
-    def forward_inference(self, x, src_mask, n=None):
+    def forward_inference(self, x_enc, src_mask=None, n=None):
         """
         x is the encoded input sequence. Given x, generate an output sequence
         using the decoder. I.e., perform the following steps:
@@ -320,19 +320,74 @@ class Transformer(nn.Module):
         c1c2c3....cn
         """
         # TODO: add mode for generating until hitting a stop token (assumes the only thing the enc-dec transformer does is the copy task)
+        b, n_, d = x_enc.shape
         if n is None:
-            n = x.shape[1]
-        with torch.no_grad():
-            # TODO: this actually depends on pad_idx, but currently is assumed to be vocab_size
-            x_dec = torch.full((len(x), 1), len(self.embedding.weight) - 1, dtype=torch.long, device=x.device)
-            lengths = torch.ones((len(x),), device=x.device)
-            x_2, src_mask_2 = self.prepare_input(x_dec, lengths, None, False)
-            # TODO: rewrite this loop to avoid redundant computation
-            for i in range(n):
-                y = self.decoder(x_2, src_mask_2, x, src_mask)
-                logits = self.linear(y) # (b, i + 1, n_classes)
-                token_probs = logits[:, :].softmax(dim=2)
-                x_dec = torch.cat((x_dec, token_probs.argmax(dim=2)[:, None, -1]), dim=1)
-                lengths = lengths + 1
-                x_2, src_mask_2 = self.prepare_input(x_dec, lengths, None, False)
-        return x_dec[:, 1:], logits
+            n = n_
+        pos_emb = self.pos_emb(torch.zeros((1, n, d), device=x_enc.device))
+        new_dec_ind = torch.full((b, 1), len(self.embedding.weight) - 1, device=x_enc.device)
+        logits = torch.empty((b, 0, self.linear.weight.shape[0]))
+        n_heads = self.decoder.transformer_blocks[0].mha.n_heads
+        old_qs = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
+        old_ks = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
+        old_vs = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
+        k_crosses = []
+        v_crosses = []
+
+        decoder_layers = self.decoder.transformer_blocks
+
+        for layer in decoder_layers:
+            kv_cross = nn.functional.linear(x_enc, layer.mha_cross.W_qkv.weight[d:])
+            k_cross, v_cross = rearrange(kv_cross, 'b s (c n_h d) -> c (b n_h) s d', c=2, n_h=n_heads)
+            k_crosses.append(k_cross)
+            v_crosses.append(v_cross)
+
+        for i in range(n):
+            new_x_2 = self.embedding(new_dec_ind)
+            new_x_2 = self.emb_dropout(new_x_2)
+            new_x_2 = new_x_2 + pos_emb[i]
+            for j, layer in enumerate(decoder_layers):
+                # ====================================================
+                # SELF ATTENTION
+                # ====================================================
+                new_qkv = layer.mha.W_qkv(new_x_2)
+                new_q, new_k, new_v = rearrange(new_qkv, 'b s (c n_h d) -> c (b n_h) s d', n_h=n_heads, c=3)
+                full_q = torch.cat((old_qs[j], new_q), dim=1)
+                full_k = torch.cat((old_ks[j], new_k), dim=1)
+                full_v = torch.cat((old_vs[j], new_v), dim=1)
+                old_qs[j], old_ks[j], old_vs[j] = full_q, full_k, full_v
+                
+                # compute attention weights for the new query
+                a = new_q @ full_k.transpose(1, 2) / ((d/n_heads) ** 0.5)
+                a = a.softmax(dim=2)
+                
+                # compute weighted combination of values for the new query
+                # a: (b*n_h, 1, i+1)
+                # full_v: (b*n_h, i+1, d)
+                z = rearrange(a @ full_v, '(b n_h) s d -> b s (n_h d)', n_h=n_heads)
+                z = layer.mha.W_o(z)
+                new_x_2 = layer.norm1(new_x_2 + z)
+
+                # ====================================================
+                # CROSS ATTENTION
+                # ====================================================
+                new_q = nn.functional.linear(new_x_2, layer.mha_cross.W_qkv.weight[:d])
+                new_q = rearrange(new_q, 'b s (n_h d) -> (b n_h) s d', n_h=n_heads)
+                a = new_q @ k_crosses[j].transpose(1, 2) / ((d/n_heads) ** 0.5)
+                if src_mask is not None:
+                    a = rearrange(a, '(b n_h) s1 s2 -> b n_h s1 s2', n_h=n_heads)
+                    a.masked_fill_(src_mask[:, None, None, :], float("-inf"))
+                    a = rearrange(a, 'b n_h s1 s2 -> (b n_h) s1 s2', n_h=n_heads)
+                a = a.softmax(dim=2)
+                z = rearrange(a @ v_crosses[j], '(b n_h) s d -> b s (n_h d)', n_h=n_heads)
+                z = layer.mha_cross.W_o(z)
+                new_x_2 = layer.norm_cross(new_x_2 + z)
+
+                # ====================================================
+                # FEED FORWARD
+                # ====================================================
+                new_x_2 = layer.norm2(new_x_2 + layer.ff_layer(new_x_2))
+
+            new_logits = self.linear(new_x_2) # (b, 1, n_classes)
+            new_dec_ind = new_logits.argmax(dim=2) # (b, 1)
+            logits = torch.cat((logits, new_logits), dim=1)
+        return logits
