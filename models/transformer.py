@@ -25,11 +25,11 @@ class PosEmb(nn.Module):
         super().__init__()
         self.dim = dim
         
-    def forward(self, x):
+    def forward(self, x, offset=0):
         # x: [batch_size, max_seq_len, emb_dim]
         # returns positional embedding of shape [max_seq_len, emb_dim]
         b, s, d = x.shape
-        return make_sinusoidal_emb(s, d, x.device)
+        return make_sinusoidal_emb(s, d, x.device, offset)
         
         
 class FFLayer(nn.Module):
@@ -266,9 +266,9 @@ class Transformer(nn.Module):
         x, src_mask = self.prepare_input(x, seq_lens, src_mask, self.append_cls)
         if (x_2 is not None) and (not self.inference):
             # TODO: support padding idx other than vocab_size
-            start_pad = torch.full((len(x_2), 1), len(self.embedding.weight) - 1, dtype=torch.long, device=x_2.device)
+            start_pad = torch.full((len(x_2), 1), self.embedding.padding_idx, dtype=torch.long, device=x_2.device)
             x_2 = torch.cat((start_pad, x_2), dim=1)
-            x_2, src_mask_2 = self.prepare_input(x_2[:, :-1], seq_lens_2, None, False)
+            x_2, src_mask_2 = self.prepare_input(x_2[:, :-1], seq_lens_2, None, False, offset=-1)
 
         x = self.encoder(x, src_mask)
         if hasattr(self, 'decoder') and (not self.inference):
@@ -286,11 +286,11 @@ class Transformer(nn.Module):
 
         return logits
 
-    def prepare_input(self, x, seq_lens, src_mask, append_cls):
+    def prepare_input(self, x, seq_lens, src_mask, append_cls, offset=0):
         x = self.embedding(x)
         x = self.emb_dropout(x)
         if not self.relative:
-            x = x + self.pos_emb(x)
+            x = x + self.pos_emb(x, offset=offset)
         if append_cls:
             x = torch.cat((self.cls_token.repeat(len(x), 1, 1), x), dim=1)
         if self.emb_norm:
@@ -308,7 +308,7 @@ class Transformer(nn.Module):
         super(Transformer, self).train(*args, **kwargs)
         self.inference = False
 
-    def forward_inference(self, x_enc, src_mask=None, n=None):
+    def forward_inference(self, x_enc, src_mask=None, n=None, offset=0):
         """
         x is the encoded input sequence. Given x, generate an output sequence
         using the decoder. I.e., perform the following steps:
@@ -323,13 +323,14 @@ class Transformer(nn.Module):
         b, n_, d = x_enc.shape
         if n is None:
             n = n_
-        pos_emb = self.pos_emb(torch.zeros((1, n, d), device=x_enc.device))
-        new_dec_ind = torch.full((b, 1), len(self.embedding.weight) - 1, device=x_enc.device)
-        logits = torch.empty((b, 0, self.linear.weight.shape[0]))
+        pos_emb = self.pos_emb(torch.zeros((1, n, d), device=x_enc.device), offset=-1)
+        new_dec_ind = torch.full((b, 1), self.embedding.padding_idx, device=x_enc.device)
+        logits = torch.empty((b, 0, self.linear.weight.shape[0]), device=x_enc.device)
         n_heads = self.decoder.transformer_blocks[0].mha.n_heads
-        old_qs = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
-        old_ks = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
-        old_vs = [torch.empty((b*n_heads, 0, d // n_heads)) for j in range(6)]
+        n_layers = len(self.decoder.transformer_blocks)
+        old_qs = [torch.empty((b*n_heads, 0, d // n_heads), device=x_enc.device) for j in range(n_layers)]
+        old_ks = [torch.empty((b*n_heads, 0, d // n_heads), device=x_enc.device) for j in range(n_layers)]
+        old_vs = [torch.empty((b*n_heads, 0, d // n_heads), device=x_enc.device) for j in range(n_layers)]
         k_crosses = []
         v_crosses = []
 
